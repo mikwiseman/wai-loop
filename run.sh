@@ -40,7 +40,7 @@ warn() { echo "  · $*"; }
 run_eval() {
   if [ -f "memory/eval.sh" ]; then
     local result
-    result=$(timeout 120 bash memory/eval.sh 2>/dev/null | tail -1 | tr -dc '0-9.' || echo "")
+    result=$(bash memory/eval.sh 2>/dev/null | tail -1 | tr -dc '0-9.' || echo "")
     echo "${result:-error}"
   else
     echo ""
@@ -258,7 +258,7 @@ MEMRULE
 
   if [ "$NEEDS_EVAL" = true ]; then
     log "Creating eval..."
-    timeout 600 claude -p "You are preparing a project for an autonomous AI agent loop.
+    claude -p "You are preparing a project for an autonomous AI agent loop.
 
 The goal: \"$GOAL\"
 
@@ -275,19 +275,19 @@ Do these steps IN ORDER:
    - Run the measurement command for this goal
    - Extract the key metric as a single number
    - Print ONLY that number on the last line — nothing else
-   - Complete in under 120 seconds (use timeout)
+   - Complete in under 120 seconds
 
    Examples of what eval.sh should look like:
 
    For 'fix all failing tests':
      #!/bin/bash
      pytest --tb=no -q > /tmp/eval-output.log 2>&1 || true
-     grep -oP '\d+ failed' /tmp/eval-output.log | grep -oP '\d+' || echo '0'
+     grep -oE '[0-9]+ failed' /tmp/eval-output.log | grep -oE '[0-9]+' || echo '0'
 
    For 'improve test coverage to 80%':
      #!/bin/bash
      pytest --cov --cov-report=term > /tmp/eval-output.log 2>&1 || true
-     grep 'TOTAL' /tmp/eval-output.log | grep -oP '\d+%' | grep -oP '\d+' || echo '0'
+     grep 'TOTAL' /tmp/eval-output.log | grep -oE '[0-9]+%' | grep -oE '[0-9]+' || echo '0'
 
    For 'fix ESLint warnings':
      #!/bin/bash
@@ -313,7 +313,7 @@ Do these steps IN ORDER:
    - The eval command being used
 
 Do NOT start fixing anything. Only prepare and measure.
-Every command must use timeout. Do NOT start servers or long-running processes." \
+Do NOT start servers or long-running processes." \
       --dangerously-skip-permissions || true
 
     # Verify eval works by running it
