@@ -36,6 +36,28 @@ log()  { echo "  $*"; }
 ok()   { echo "  ✓ $*"; }
 warn() { echo "  · $*"; }
 
+# Filter stream-json output to show agent activity
+show_agent_progress() {
+  while IFS= read -r line; do
+    case "$line" in
+      *'"type":"tool_use"'*)
+        local rest="${line#*\"name\":\"}"
+        local tool="${rest%%\"*}"
+        if [ "$tool" = "Bash" ] && [[ "$line" == *'"description":'* ]]; then
+          local d="${line#*\"description\":\"}"
+          printf "    %s\n" "${d%%\"*}"
+        elif [[ "$line" == *'"file_path":'* ]]; then
+          local fp="${line#*\"file_path\":\"}"
+          fp="${fp%%\"*}"
+          printf "    → %s %s\n" "$tool" "${fp##*/}"
+        else
+          printf "    → %s\n" "$tool"
+        fi
+        ;;
+    esac
+  done
+}
+
 # Run the eval script, return the metric (single number on last line)
 run_eval() {
   if [ -f "memory/eval.sh" ]; then
@@ -441,9 +463,11 @@ while true; do
   echo "  ── Iteration $ITERATION · $(date +%H:%M) ──────────────────────────────"
   echo ""
 
-  # Agent works until it exits
+  # Agent works until it exits.
+  # stream-json + show_agent_progress: show tool calls in real-time.
   # || true: claude exits non-zero on context overflow or interruption — expected.
-  claude -p "$PROMPT" --dangerously-skip-permissions || true
+  claude -p "$PROMPT" --dangerously-skip-permissions \
+    --output-format stream-json --verbose 2>&1 | show_agent_progress || true
 
   CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "none")
   ITER_ELAPSED=$(( $(date +%s) - ITER_START ))
