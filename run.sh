@@ -22,40 +22,109 @@
 
 set -euo pipefail
 
+# ─── Colors & Symbols ────────────────────────────────────────────
+
+if [ -t 1 ]; then
+  RST='\033[0m'
+  BOLD='\033[1m'
+  DIM='\033[0;90m'
+  CYAN='\033[1;36m'
+  GREEN='\033[1;32m'
+  YELLOW='\033[1;33m'
+  RED='\033[1;31m'
+  MAG='\033[1;35m'
+  WHITE='\033[1;37m'
+  BG_GREEN='\033[42;1;37m'
+  BG_RED='\033[41;1;37m'
+else
+  RST='' BOLD='' DIM='' CYAN='' GREEN='' YELLOW='' RED='' MAG='' WHITE='' BG_GREEN='' BG_RED=''
+fi
+
 # ─── Helpers ──────────────────────────────────────────────────────
 
 cleanup() {
   pkill -P $$ 2>/dev/null || true
   echo ""
-  echo "  === Interrupted. Changes are safe in git. ==="
+  printf "  ${YELLOW}Interrupted.${RST} Changes are safe in git.\n"
   exit 0
 }
 trap cleanup INT TERM
 
-log()  { echo "  $*"; }
-ok()   { echo "  ✓ $*"; }
-warn() { echo "  · $*"; }
+log()  { printf "  %b\n" "$*"; }
+ok()   { printf "  ${GREEN}✓${RST} %b\n" "$*"; }
+warn() { printf "  ${YELLOW}·${RST} %b\n" "$*"; }
+fail() { printf "  ${RED}✗${RST} %b\n" "$*"; }
 
-# Filter stream-json output to show agent activity
+# Draw a progress bar: progress_bar <current> <target> <baseline> <comparator>
+progress_bar() {
+  local current="${1:-0}" target="${2:-0}" baseline="${3:-0}" comparator="${4:->=}"
+  local width=30 pct=0
+
+  [[ "$current" =~ ^[0-9]+$ ]] || return
+  [[ "$target" =~ ^[0-9]+$ ]] || return
+  [[ "$baseline" =~ ^[0-9]+$ ]] || return
+
+  case "$comparator" in
+    ">="*|">"*)
+      if [ "$target" -gt "$baseline" ] 2>/dev/null; then
+        pct=$(( (current - baseline) * 100 / (target - baseline) ))
+      elif [ "$target" -eq "$baseline" ] 2>/dev/null; then
+        pct=100
+      fi
+      ;;
+    *)
+      if [ "$baseline" -gt "$target" ] 2>/dev/null; then
+        pct=$(( (baseline - current) * 100 / (baseline - target) ))
+      elif [ "$baseline" -eq "$target" ] 2>/dev/null; then
+        pct=100
+      fi
+      ;;
+  esac
+
+  [ "$pct" -lt 0 ] 2>/dev/null && pct=0
+  [ "$pct" -gt 100 ] 2>/dev/null && pct=100
+
+  local filled=$(( pct * width / 100 ))
+  local empty=$(( width - filled ))
+
+  local bar=""
+  local i
+  for ((i=0; i<filled; i++)); do bar+="█"; done
+  for ((i=0; i<empty; i++)); do bar+="░"; done
+
+  local color="$YELLOW"
+  [ "$pct" -ge 30 ] && color="$CYAN"
+  [ "$pct" -ge 70 ] && color="$GREEN"
+
+  printf "  ${DIM}▐${RST}${color}${bar}${RST}${DIM}▌${RST} ${BOLD}%d%%${RST}" "$pct"
+}
+
+# Filter stream-json output to show agent activity with colors
 show_agent_progress() {
+  local count=0
   while IFS= read -r line; do
     case "$line" in
       *'"type":"tool_use"'*)
+        count=$((count + 1))
         local rest="${line#*\"name\":\"}"
         local tool="${rest%%\"*}"
         if [ "$tool" = "Bash" ] && [[ "$line" == *'"description":'* ]]; then
           local d="${line#*\"description\":\"}"
-          printf "    %s\n" "${d%%\"*}"
+          printf "  ${DIM}│${RST} ${WHITE}%s${RST}\n" "${d%%\"*}"
         elif [[ "$line" == *'"file_path":'* ]]; then
           local fp="${line#*\"file_path\":\"}"
           fp="${fp%%\"*}"
-          printf "    → %s %s\n" "$tool" "${fp##*/}"
+          printf "  ${DIM}│ → %s %s${RST}\n" "$tool" "${fp##*/}"
         else
-          printf "    → %s\n" "$tool"
+          printf "  ${DIM}│ → %s${RST}\n" "$tool"
         fi
         ;;
     esac
   done
+  if [ "$count" -gt 0 ]; then
+    printf "  ${DIM}│ %d actions${RST}\n" "$count"
+    printf "  ${DIM}│${RST}\n"
+  fi
 }
 
 # Run the eval script, return the metric (single number on last line)
@@ -152,7 +221,7 @@ fi
 # ─── Check prerequisites ─────────────────────────────────────────
 
 if ! command -v claude &>/dev/null; then
-  echo "  ✗ Claude Code not found"
+  fail "Claude Code not found"
   echo "    Install: curl -fsSL https://claude.ai/install.sh | bash"
   exit 1
 fi
@@ -168,7 +237,7 @@ if [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -f "$HOME/.claude-default" ]; then
 fi
 
 if ! command -v git &>/dev/null; then
-  echo "  ✗ Git not found"
+  fail "Git not found"
   exit 1
 fi
 
@@ -177,15 +246,15 @@ fi
 # ═════════════════════════════════════════════════════════════════
 
 echo ""
-echo "  wai-loop"
+printf "  ${CYAN}${BOLD}wai-loop${RST}\n"
 echo ""
 if [ -n "$GOAL" ]; then
-  log "Goal  $GOAL"
+  printf "  ${BOLD}Goal${RST}  %s\n" "$GOAL"
 else
-  log "Prompt  $PROMPT_FILE"
+  printf "  ${BOLD}Prompt${RST}  %s\n" "$PROMPT_FILE"
 fi
 echo ""
-log "Setting up..."
+printf "  ${DIM}Setting up...${RST}\n"
 
 # Navigate to git root if inside a repo
 if git rev-parse --is-inside-work-tree &>/dev/null; then
@@ -244,7 +313,7 @@ if [ -n "$GOAL" ]; then
 Keep it under 30 lines. You MUST use the Write tool to create the file." \
       --dangerously-skip-permissions || true
     if [ ! -f "CLAUDE.md" ]; then
-      echo "  ✗ Could not auto-generate CLAUDE.md."
+      fail "Could not auto-generate CLAUDE.md."
       echo "    Create it manually: describe your project, tech stack, and how to run tests."
       echo "    Then run this script again."
       exit 1
@@ -271,7 +340,7 @@ MEMRULE
   if [ -f "memory/eval.sh" ] && [ -f "memory/eval-target.txt" ]; then
     if [ -f "memory/eval-goal.txt" ] && grep -qxF "$GOAL" memory/eval-goal.txt 2>/dev/null; then
       NEEDS_EVAL=false
-      ok "Eval spec (cached)"
+      ok "Eval spec ${DIM}(cached)${RST}"
     else
       # Goal changed — re-create eval
       rm -f memory/eval.sh memory/eval-target.txt memory/eval-comparator.txt memory/eval-baseline.txt memory/eval-goal.txt memory/baseline.md
@@ -279,7 +348,7 @@ MEMRULE
   fi
 
   if [ "$NEEDS_EVAL" = true ]; then
-    log "Creating eval..."
+    printf "  ${DIM}Creating eval...${RST}\n"
     claude -p "You are preparing a project for an autonomous AI agent loop.
 
 The goal: \"$GOAL\"
@@ -344,9 +413,9 @@ Do NOT start servers or long-running processes." \
       EVAL_RESULT=$(run_eval)
       if [[ "$EVAL_RESULT" =~ ^[0-9.]+$ ]]; then
         echo "$EVAL_RESULT" > memory/eval-baseline.txt
-        ok "Eval verified (baseline: $EVAL_RESULT)"
+        ok "Eval verified ${DIM}(baseline: ${MAG}$EVAL_RESULT${RST}${DIM})${RST}"
       else
-        warn "Eval returned '$EVAL_RESULT' — falling back to commit-based tracking"
+        warn "Eval returned '${RED}$EVAL_RESULT${RST}' — falling back to commit-based tracking"
         rm -f memory/eval.sh
       fi
     else
@@ -368,16 +437,21 @@ Do NOT start servers or long-running processes." \
     git commit -q -m "wai-loop: setup for goal" -m "$GOAL"
   fi
 
-  # Display baseline
+  # Display baseline with progress bar
   if [ -f "memory/eval-baseline.txt" ] && [ -f "memory/eval-target.txt" ]; then
     BASELINE_VAL=$(cat memory/eval-baseline.txt)
     TARGET_VAL=$(cat memory/eval-target.txt)
+    COMPARATOR_VAL=$(cat memory/eval-comparator.txt 2>/dev/null || echo ">=")
     echo ""
-    echo "  ┌─────────────────────────────────────────┐"
-    echo "  │                                         │"
-    printf "  │   Baseline: %-10s Target: %-9s│\n" "$BASELINE_VAL" "$TARGET_VAL"
-    echo "  │                                         │"
-    echo "  └─────────────────────────────────────────┘"
+    printf "  ${DIM}┌─────────────────────────────────────────────┐${RST}\n"
+    printf "  ${DIM}│${RST}                                             ${DIM}│${RST}\n"
+    printf "  ${DIM}│${RST}   Baseline: ${MAG}${BOLD}%-10s${RST} Target: ${CYAN}${BOLD}%-10s${RST}${DIM}│${RST}\n" "$BASELINE_VAL" "$TARGET_VAL"
+    printf "  ${DIM}│${RST}                                             ${DIM}│${RST}\n"
+    printf "  ${DIM}│${RST} "
+    progress_bar "$BASELINE_VAL" "$TARGET_VAL" "$BASELINE_VAL" "$COMPARATOR_VAL"
+    printf "              ${DIM}│${RST}\n"
+    printf "  ${DIM}│${RST}                                             ${DIM}│${RST}\n"
+    printf "  ${DIM}└─────────────────────────────────────────────┘${RST}\n"
   fi
 
   echo ""
@@ -442,10 +516,9 @@ START_TIME=$(date +%s)
 PREV_METRIC="${EVAL_BASELINE}"
 TRAJECTORY="${EVAL_BASELINE}"
 
-log "Loop started ($(date +%H:%M))"
-log "Max: $MAX_ITERATIONS iterations, $MAX_FAILURES stalls"
+printf "  ${DIM}Loop started at $(date +%H:%M) · max %d iterations · %d stalls${RST}\n" "$MAX_ITERATIONS" "$MAX_FAILURES"
 if [ "$HAS_EVAL" = true ]; then
-  log "Eval: baseline=$EVAL_BASELINE target=$EVAL_TARGET"
+  printf "  ${DIM}Eval: ${MAG}%s${DIM} → ${CYAN}%s${RST}\n" "$EVAL_BASELINE" "$EVAL_TARGET"
 fi
 echo ""
 
@@ -457,11 +530,11 @@ while true; do
   # Safety: max iterations
   if [ "$ITERATION" -gt "$MAX_ITERATIONS" ]; then
     echo ""
-    log "=== Max iterations ($MAX_ITERATIONS) reached. ==="
+    printf "  ${YELLOW}${BOLD}Max iterations ($MAX_ITERATIONS) reached.${RST}\n"
     break
   fi
 
-  echo "  ── Iteration $ITERATION · $(date +%H:%M) ──────────────────────────────"
+  printf "  ${BOLD}═══ Iteration %d ${RST}${DIM}═══════════════════════════════════════ %s${RST}\n" "$ITERATION" "$(date +%H:%M)"
   echo ""
 
   # Agent works until it exits.
@@ -510,9 +583,26 @@ while true; do
 
   # ── Evaluate progress ──
   if [ "$HAS_EVAL" = true ]; then
+    printf "  ${DIM}Measuring...${RST}"
     CURRENT_METRIC=$(run_eval)
 
     if [[ "$CURRENT_METRIC" =~ ^[0-9.]+$ ]]; then
+      printf "\r                \r"
+
+      # Calculate delta
+      DELTA=""
+      DELTA_COLOR="$DIM"
+      if [[ "$PREV_METRIC" =~ ^[0-9]+$ ]] && [[ "$CURRENT_METRIC" =~ ^[0-9]+$ ]]; then
+        DIFF=$((CURRENT_METRIC - PREV_METRIC))
+        if [ "$DIFF" -gt 0 ]; then
+          DELTA=" (+$DIFF)"
+          DELTA_COLOR="$GREEN"
+        elif [ "$DIFF" -lt 0 ]; then
+          DELTA=" ($DIFF)"
+          DELTA_COLOR="$RED"
+        fi
+      fi
+
       # Update trajectory (only if metric changed)
       LAST_IN_TRAJECTORY=$(echo "$TRAJECTORY" | sed 's/.* → //')
       if [ "$CURRENT_METRIC" != "$LAST_IN_TRAJECTORY" ]; then
@@ -522,17 +612,20 @@ while true; do
       # Log to progress file
       echo "$(date +%H:%M) iteration=$ITERATION metric=$CURRENT_METRIC commits=$COMMIT_COUNT" >> memory/progress.log
 
-      # Display
+      # Display result
       if [ "$COMMIT_COUNT" -gt 0 ]; then
-        ok "$COMMIT_COUNT commit(s) · metric: $CURRENT_METRIC (target: $EVAL_TARGET)    ${ITER_TIME}"
+        printf "  ${GREEN}✓ ${BOLD}%d commit(s)${RST} · ${MAG}%s${RST}${DELTA_COLOR}%s${RST}    ${DIM}%s${RST}\n" "$COMMIT_COUNT" "$CURRENT_METRIC" "$DELTA" "$ITER_TIME"
       else
-        warn "no commits · metric: $CURRENT_METRIC (target: $EVAL_TARGET)    ${ITER_TIME}"
+        printf "  ${YELLOW}· no commits${RST} · ${MAG}%s${RST}${DELTA_COLOR}%s${RST}    ${DIM}%s${RST}\n" "$CURRENT_METRIC" "$DELTA" "$ITER_TIME"
       fi
+
+      # Progress bar
+      progress_bar "$CURRENT_METRIC" "$EVAL_TARGET" "$EVAL_BASELINE" "$EVAL_COMPARATOR"
+      echo ""
 
       # Goal achieved?
       if check_goal "$CURRENT_METRIC" "$EVAL_COMPARATOR" "$EVAL_TARGET"; then
         echo ""
-        log "=== Goal achieved! ($TRAJECTORY) ==="
         break
       fi
 
@@ -541,8 +634,10 @@ while true; do
         FAILURES=$((FAILURES + 1))
         if [ "$FAILURES" -ge "$MAX_FAILURES" ]; then
           echo ""
-          log "=== Stalled at $CURRENT_METRIC (target: $EVAL_TARGET). ==="
+          printf "  ${YELLOW}${BOLD}Stalled at %s${RST} ${DIM}(target: %s, %d/%d stalls)${RST}\n" "$CURRENT_METRIC" "$EVAL_TARGET" "$FAILURES" "$MAX_FAILURES"
           break
+        else
+          printf "  ${DIM}stall %d/%d${RST}\n" "$FAILURES" "$MAX_FAILURES"
         fi
       else
         FAILURES=0
@@ -550,16 +645,17 @@ while true; do
       PREV_METRIC="$CURRENT_METRIC"
 
     else
+      printf "\r                \r"
       # Eval failed this iteration — fall back to commit-based
       if [ "$COMMIT_COUNT" -gt 0 ]; then
-        ok "$COMMIT_COUNT commit(s) (eval unavailable)    ${ITER_TIME}"
+        printf "  ${GREEN}✓ ${BOLD}%d commit(s)${RST} ${DIM}(eval unavailable)${RST}    ${DIM}%s${RST}\n" "$COMMIT_COUNT" "$ITER_TIME"
         FAILURES=0
       else
         FAILURES=$((FAILURES + 1))
-        warn "no changes ($FAILURES/$MAX_FAILURES)    ${ITER_TIME}"
+        printf "  ${YELLOW}· no changes${RST} ${DIM}(%d/%d)${RST}    ${DIM}%s${RST}\n" "$FAILURES" "$MAX_FAILURES" "$ITER_TIME"
         if [ "$FAILURES" -ge "$MAX_FAILURES" ]; then
           echo ""
-          log "=== Stuck. No progress in $MAX_FAILURES iterations. ==="
+          printf "  ${YELLOW}${BOLD}Stuck.${RST} No progress in %d iterations.\n" "$MAX_FAILURES"
           break
         fi
       fi
@@ -568,14 +664,14 @@ while true; do
   else
     # No eval — commit-based progress detection
     if [ "$COMMIT_COUNT" -gt 0 ]; then
-      ok "$COMMIT_COUNT commit(s)    ${ITER_TIME}"
+      printf "  ${GREEN}✓ ${BOLD}%d commit(s)${RST}    ${DIM}%s${RST}\n" "$COMMIT_COUNT" "$ITER_TIME"
       FAILURES=0
     else
       FAILURES=$((FAILURES + 1))
-      warn "no changes ($FAILURES/$MAX_FAILURES)    ${ITER_TIME}"
+      printf "  ${YELLOW}· no changes${RST} ${DIM}(%d/%d)${RST}    ${DIM}%s${RST}\n" "$FAILURES" "$MAX_FAILURES" "$ITER_TIME"
       if [ "$FAILURES" -ge "$MAX_FAILURES" ]; then
         echo ""
-        log "=== Stuck. No progress in $MAX_FAILURES iterations. ==="
+        printf "  ${YELLOW}${BOLD}Stuck.${RST} No progress in %d iterations.\n" "$MAX_FAILURES"
         break
       fi
     fi
@@ -605,24 +701,56 @@ echo ""
 
 if [ "$HAS_EVAL" = true ]; then
   FINAL_METRIC=$(run_eval)
+  GOAL_MET=false
+  if [[ "$FINAL_METRIC" =~ ^[0-9.]+$ ]] && check_goal "$FINAL_METRIC" "$EVAL_COMPARATOR" "$EVAL_TARGET" 2>/dev/null; then
+    GOAL_MET=true
+  fi
 
-  echo "  ┌─────────────────────────────────────────┐"
-  echo "  │                                         │"
-  printf "  │   Before: %-10s After: %-10s │\n" "$EVAL_BASELINE" "${FINAL_METRIC:-?}"
-  printf "  │   Target: %-29s│\n" "$EVAL_TARGET"
-  echo "  │                                         │"
-  echo "  └─────────────────────────────────────────┘"
+  if [ "$GOAL_MET" = true ]; then
+    # ── Celebration ──
+    printf "  ${GREEN}${BOLD}╔═══════════════════════════════════════════════════╗${RST}\n"
+    printf "  ${GREEN}${BOLD}║${RST}                                                   ${GREEN}${BOLD}║${RST}\n"
+    printf "  ${GREEN}${BOLD}║${RST}            ${BG_GREEN} ★  GOAL ACHIEVED  ★ ${RST}              ${GREEN}${BOLD}║${RST}\n"
+    printf "  ${GREEN}${BOLD}║${RST}                                                   ${GREEN}${BOLD}║${RST}\n"
+    printf "  ${GREEN}${BOLD}║${RST}   ${MAG}%-47s${RST}${GREEN}${BOLD}║${RST}\n" "$TRAJECTORY"
+    printf "  ${GREEN}${BOLD}║${RST}                                                   ${GREEN}${BOLD}║${RST}\n"
+    printf "  ${GREEN}${BOLD}║${RST} "
+    progress_bar "$FINAL_METRIC" "$EVAL_TARGET" "$EVAL_BASELINE" "$EVAL_COMPARATOR"
+    printf "                    ${GREEN}${BOLD}║${RST}\n"
+    printf "  ${GREEN}${BOLD}║${RST}                                                   ${GREEN}${BOLD}║${RST}\n"
+    printf "  ${GREEN}${BOLD}║${RST}   ${CYAN}%s commits · %d iterations · %dm${RST}" "$TOTAL_COMMITS" "$ITERATION" "$TOTAL_MIN"
+    # Pad to fill the box
+    local_info="${TOTAL_COMMITS} commits · ${ITERATION} iterations · ${TOTAL_MIN}m"
+    local_pad=$((47 - ${#local_info}))
+    printf "%${local_pad}s" ""
+    printf "${GREEN}${BOLD}║${RST}\n"
+    printf "  ${GREEN}${BOLD}║${RST}                                                   ${GREEN}${BOLD}║${RST}\n"
+    printf "  ${GREEN}${BOLD}╚═══════════════════════════════════════════════════╝${RST}\n"
+  else
+    # ── Summary box (goal not met) ──
+    printf "  ${DIM}┌─────────────────────────────────────────────────┐${RST}\n"
+    printf "  ${DIM}│${RST}                                                 ${DIM}│${RST}\n"
+    printf "  ${DIM}│${RST}   Before: ${MAG}${BOLD}%-10s${RST} After: ${MAG}${BOLD}%-10s${RST}      ${DIM}│${RST}\n" "$EVAL_BASELINE" "${FINAL_METRIC:-?}"
+    printf "  ${DIM}│${RST}   Target: ${CYAN}%-10s${RST}                           ${DIM}│${RST}\n" "$EVAL_TARGET"
+    printf "  ${DIM}│${RST}                                                 ${DIM}│${RST}\n"
+    printf "  ${DIM}│${RST} "
+    progress_bar "${FINAL_METRIC:-0}" "$EVAL_TARGET" "$EVAL_BASELINE" "$EVAL_COMPARATOR"
+    printf "                      ${DIM}│${RST}\n"
+    printf "  ${DIM}│${RST}                                                 ${DIM}│${RST}\n"
+    printf "  ${DIM}└─────────────────────────────────────────────────┘${RST}\n"
+  fi
+
   echo ""
   if [ -n "$TRAJECTORY" ]; then
-    log "Progress  $TRAJECTORY"
+    printf "  ${BOLD}Progress${RST}  ${MAG}%s${RST}\n" "$TRAJECTORY"
   fi
 fi
 
-log "Done in $ITERATION iterations · $TOTAL_COMMITS commits · ${TOTAL_MIN}m"
+printf "  ${BOLD}Done${RST} in %d iterations · %s commits · %dm\n" "$ITERATION" "$TOTAL_COMMITS" "$TOTAL_MIN"
 echo ""
-log "Review    git log --oneline"
-log "Memory    cat memory/failed-experiments.md"
+printf "  ${DIM}Review    git log --oneline${RST}\n"
+printf "  ${DIM}Memory    cat memory/failed-experiments.md${RST}\n"
 if [ -n "$GOAL" ]; then
-  log "Resume    ./run.sh \"$GOAL\""
+  printf "  ${DIM}Resume    ./run.sh \"%s\"${RST}\n" "$GOAL"
 fi
 echo ""
