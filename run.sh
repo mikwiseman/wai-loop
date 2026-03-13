@@ -7,15 +7,17 @@
 # Usage:
 #   ./run.sh "fix all failing tests"
 #   ./run.sh "improve test coverage to 80%"
-#   ./run.sh "optimize the slowest API endpoint"
 #   ./run.sh custom-prompt.md              # advanced: full prompt file
 #   ./run.sh "goal" --max-failures 5       # custom failure limit
 #
 # Overnight:
 #   tmux new -s loop && ./run.sh "fix all failing tests"
 #   # Detach: Ctrl+B, D | Reattach: tmux attach -t loop
+#   # Stop: Ctrl+C
 
 set -euo pipefail
+
+trap 'echo ""; echo "=== Interrupted. Changes are safe in git. ==="; exit 0' INT TERM
 
 # ─── Parse arguments ──────────────────────────────────────────────
 
@@ -25,16 +27,27 @@ MAX_FAILURES=3
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --max-failures) MAX_FAILURES="$2"; shift 2 ;;
+    --max-failures)
+      if [[ "$2" =~ ^[0-9]+$ ]]; then
+        MAX_FAILURES="$2"
+      else
+        echo "Error: --max-failures must be a number, got '$2'"
+        exit 1
+      fi
+      shift 2
+      ;;
     -h|--help)
       echo "wai-loop — zero-config AI agent loop with memory."
       echo ""
       echo "Usage:"
       echo "  ./run.sh \"fix all failing tests\""
       echo "  ./run.sh \"improve test coverage to 80%\""
-      echo "  ./run.sh \"optimize the slowest API endpoint\""
+      echo "  ./run.sh \"fix all pytest failures\""
       echo "  ./run.sh custom-prompt.md"
       echo "  ./run.sh \"goal\" --max-failures 5"
+      echo ""
+      echo "Stop: Ctrl+C (changes are safe in git)"
+      echo "First run sets up memory files automatically."
       exit 0
       ;;
     *)
@@ -71,26 +84,54 @@ fi
 
 echo "=== Setup ==="
 
+# Navigate to git root if inside a repo
+if git rev-parse --is-inside-work-tree &>/dev/null; then
+  cd "$(git rev-parse --show-toplevel)"
+fi
+
+# .gitignore FIRST — before any git add
+if [ ! -f ".gitignore" ]; then
+  cat > .gitignore << 'GIEOF'
+*.log
+node_modules/
+__pycache__/
+.venv/
+.env
+.env.*
+*.pem
+*.key
+.DS_Store
+GIEOF
+  echo "Created .gitignore"
+else
+  for pattern in '*.log' '.env' '.env.*' '*.pem' '*.key'; do
+    grep -qxF "$pattern" .gitignore 2>/dev/null || echo "$pattern" >> .gitignore
+  done
+fi
+
 # Git repo
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
   echo "Initializing git..."
   git init
-  [ -n "$(ls)" ] && git add -A && git commit -m "Initial commit (before wai-loop)"
+  git add -A
+  git commit -m "Initial commit (before wai-loop)"
 fi
 
 # CLAUDE.md — project description for the agent
 if [ ! -f "CLAUDE.md" ]; then
   echo "Generating CLAUDE.md (project analysis)..."
-  claude -p "Analyze this project directory. Create a file called CLAUDE.md with:
+  claude -p "Analyze this project directory. Use the Write tool to create a file called CLAUDE.md with:
 - What the project does (1-2 sentences)
 - Tech stack
 - How to run tests (if applicable)
 - Key conventions
-Keep it under 30 lines. Write the file directly." \
-    --dangerously-skip-permissions 2>/dev/null || true
+Keep it under 30 lines. You MUST use the Write tool to create the file." \
+    --dangerously-skip-permissions > /dev/null 2>&1 || true
   if [ ! -f "CLAUDE.md" ]; then
-    echo "# Project" > CLAUDE.md
-    echo "Could not auto-generate CLAUDE.md. Edit it manually."
+    echo "ERROR: Could not auto-generate CLAUDE.md."
+    echo "Create it manually: describe your project, tech stack, and how to run tests."
+    echo "Then run this script again."
+    exit 1
   fi
   echo "Created CLAUDE.md"
 fi
@@ -111,13 +152,6 @@ fi
 mkdir -p memory
 [ ! -f "memory/failed-experiments.md" ] && echo "# Failed Experiments" > memory/failed-experiments.md
 [ ! -f "memory/successful-approaches.md" ] && echo "# Successful Approaches" > memory/successful-approaches.md
-
-# .gitignore
-if [ -f ".gitignore" ]; then
-  grep -q '\.log' .gitignore 2>/dev/null || echo '*.log' >> .gitignore
-else
-  echo '*.log' > .gitignore
-fi
 
 echo "Setup complete."
 echo ""
@@ -153,9 +187,11 @@ fi
 
 FAILURES=0
 ITERATION=0
+START_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "none")
 
 echo ""
 echo "=== wai-loop started ($(date)) ==="
+echo "Max failures: $MAX_FAILURES"
 echo ""
 
 while true; do
@@ -165,7 +201,7 @@ while true; do
   echo "--- Iteration $ITERATION ($(date +%H:%M)) ---"
 
   # Agent works until it exits. No timeout.
-  echo "$PROMPT" | claude -p --dangerously-skip-permissions 2>/dev/null || true
+  echo "$PROMPT" | claude -p --dangerously-skip-permissions || true
 
   CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "none")
 
@@ -193,7 +229,16 @@ while true; do
   echo ""
 done
 
+# ─── Summary ──────────────────────────────────────────────────────
+
+FINAL_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "none")
+if [ "$START_HEAD" != "none" ] && [ "$FINAL_HEAD" != "none" ] && [ "$START_HEAD" != "$FINAL_HEAD" ]; then
+  TOTAL_COMMITS=$(git rev-list "$START_HEAD".."$FINAL_HEAD" --count 2>/dev/null || echo "?")
+else
+  TOTAL_COMMITS="0"
+fi
+
 echo ""
 echo "=== wai-loop finished ==="
-echo "Iterations: $ITERATION | $(date)"
+echo "Iterations: $ITERATION | Commits: $TOTAL_COMMITS | $(date)"
 echo "Review: git log --oneline"
