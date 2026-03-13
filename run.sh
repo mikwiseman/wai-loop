@@ -135,6 +135,14 @@ if ! command -v claude &>/dev/null; then
   exit 1
 fi
 
+# Verify Claude is authenticated (catch expired tokens before wasting iterations)
+AUTH_CHECK=$(claude -p "Say OK" --max-turns 1 2>&1 || true)
+if echo "$AUTH_CHECK" | grep -qi "authentication_error\|OAuth token has expired\|not authenticated\|unauthorized"; then
+  echo "  ✗ Claude Code token expired"
+  echo "    Run: claude auth login"
+  exit 1
+fi
+
 if ! command -v git &>/dev/null; then
   echo "  ✗ Git not found"
   exit 1
