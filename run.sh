@@ -336,7 +336,8 @@ Do these steps IN ORDER:
 
 Do NOT start fixing anything. Only prepare and measure.
 Do NOT start servers or long-running processes." \
-      --dangerously-skip-permissions || true
+      --dangerously-skip-permissions \
+      --output-format stream-json --verbose 2>&1 | show_agent_progress || true
 
     # Verify eval works by running it
     if [ -f "memory/eval.sh" ]; then
