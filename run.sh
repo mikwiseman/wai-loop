@@ -136,9 +136,9 @@ if ! command -v claude &>/dev/null; then
 fi
 
 # Verify Claude is authenticated (catch expired tokens before wasting iterations)
-AUTH_CHECK=$(claude -p "Say OK" --max-turns 1 2>&1 || true)
-if echo "$AUTH_CHECK" | grep -qi "authentication_error\|OAuth token has expired\|not authenticated\|unauthorized"; then
-  echo "  ✗ Claude Code token expired"
+AUTH_CHECK=$(claude -p "Say OK" --max-turns 1 --no-mcp 2>/dev/null || true)
+if [ -z "$AUTH_CHECK" ] || echo "$AUTH_CHECK" | grep -qi "authentication_error\|OAuth token has expired"; then
+  echo "  ✗ Claude Code not authenticated"
   echo "    Run: claude auth login"
   exit 1
 fi
