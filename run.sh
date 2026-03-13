@@ -220,7 +220,7 @@ if [ -n "$GOAL" ]; then
 - How to build (if applicable)
 - Key conventions
 Keep it under 30 lines. You MUST use the Write tool to create the file." \
-      --dangerously-skip-permissions > /dev/null 2>&1 || true
+      --dangerously-skip-permissions || true
     if [ ! -f "CLAUDE.md" ]; then
       echo "  ✗ Could not auto-generate CLAUDE.md."
       echo "    Create it manually: describe your project, tech stack, and how to run tests."
@@ -314,7 +314,7 @@ Do these steps IN ORDER:
 
 Do NOT start fixing anything. Only prepare and measure.
 Every command must use timeout. Do NOT start servers or long-running processes." \
-      --dangerously-skip-permissions > /dev/null 2>&1 || true
+      --dangerously-skip-permissions || true
 
     # Verify eval works by running it
     if [ -f "memory/eval.sh" ]; then
