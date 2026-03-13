@@ -135,6 +135,15 @@ if ! command -v claude &>/dev/null; then
   exit 1
 fi
 
+# Multi-profile support: if CLAUDE_CONFIG_DIR is not already set,
+# read the default profile from ~/.claude-default (matches the zsh wrapper in .zshrc).
+# Without this, the bare binary defaults to ~/.claude/ which may have no auth tokens.
+if [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -f "$HOME/.claude-default" ]; then
+  PROFILE=$(cat "$HOME/.claude-default")
+  if [ -d "$HOME/.claude-$PROFILE" ]; then
+    export CLAUDE_CONFIG_DIR="$HOME/.claude-$PROFILE"
+  fi
+fi
 
 if ! command -v git &>/dev/null; then
   echo "  ✗ Git not found"
