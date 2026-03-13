@@ -1,0 +1,23 @@
+# Project Rules
+
+## About this project
+[Describe your project: what it does, tech stack, main conventions]
+
+## Architecture
+[Key architectural decisions the agent should know about]
+
+## Constraints
+[What the agent should NOT touch or change]
+
+## Memory
+Before starting work, read memory/failed-experiments.md — do not repeat approaches that already failed.
+After a successful fix, write a note to memory/successful-fixes.md.
+After a failed approach, write a note to memory/failed-experiments.md with the date and reason.
+
+## Testing
+[How to run tests, what framework, expected output format]
+Example: npm test > test.log 2>&1
+
+## Output discipline
+All command output goes to files (> file.log 2>&1).
+Read only relevant lines via grep. Never dump full logs into context.
