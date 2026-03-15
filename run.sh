@@ -46,20 +46,24 @@ LOCKDIR=""
 
 cleanup() {
   # Prevent re-entry from signals during cleanup
-  trap '' INT TERM
+  trap '' INT TERM EXIT
   INTERRUPTED=1
-  # Kill all child processes (claude, subshells, etc.)
-  pkill -P "$$" 2>/dev/null || true
-  # Remove lockfile
-  [ -n "$LOCKDIR" ] && rmdir "$LOCKDIR" 2>/dev/null || true
-  echo ""
-  printf "  ${YELLOW}Interrupted.${RST} Changes are safe in git.\n"
+  # Kill entire process group (catches grandchildren: node, pytest, etc.)
+  kill 0 2>/dev/null || true
+  # Clean up temp files
+  rm -f /tmp/wai-eval-out-$$.txt /tmp/wai-eval-err-$$.txt 2>/dev/null || true
+  # Remove lockfile (with PID file)
+  [ -n "$LOCKDIR" ] && rm -rf "$LOCKDIR" 2>/dev/null || true
+  # Remove stale index.lock if we interrupted a git commit
+  rm -f .git/index.lock 2>/dev/null || true
+  echo "" 2>/dev/null || true
+  printf "  ${YELLOW}Interrupted.${RST} Changes are safe in git.\n" 2>/dev/null || true
   exit 0
 }
 trap cleanup INT TERM
 
 # Remove lockfile on normal exit too
-trap '[ -n "$LOCKDIR" ] && rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
+trap '[ -n "$LOCKDIR" ] && rm -rf "$LOCKDIR" 2>/dev/null || true' EXIT
 
 log()  { printf "  %b\n" "$*"; }
 ok()   { printf "  ${GREEN}✓${RST} %b\n" "$*"; }
@@ -149,7 +153,7 @@ show_agent_progress() {
   fi
 }
 
-# Run the eval script with a 120-second timeout.
+# Run the eval script with a 60-second timeout.
 # Returns a single integer on stdout. "error" on failure.
 run_eval() {
   if [ ! -f "memory/eval.sh" ]; then
@@ -157,27 +161,33 @@ run_eval() {
     return
   fi
 
-  # Run eval in background with timeout (portable, no GNU timeout needed)
-  bash memory/eval.sh > /tmp/wai-eval-out-$$.txt 2> /tmp/wai-eval-err-$$.txt &
+  local out_file="/tmp/wai-eval-out-$$.txt"
+  local err_file="/tmp/wai-eval-err-$$.txt"
+
+  # Run eval in its own process group for clean killing
+  bash memory/eval.sh > "$out_file" 2> "$err_file" &
   local eval_pid=$!
   local elapsed=0
 
   while kill -0 "$eval_pid" 2>/dev/null; do
     sleep 1
     elapsed=$((elapsed + 1))
-    if [ "$elapsed" -ge 120 ]; then
-      kill "$eval_pid" 2>/dev/null
+    if [ "$elapsed" -ge 60 ]; then
+      # Kill eval and all its children
+      pkill -P "$eval_pid" 2>/dev/null || true
+      kill "$eval_pid" 2>/dev/null || true
       wait "$eval_pid" 2>/dev/null || true
+      rm -f "$out_file" "$err_file"
       echo "error"
       return
     fi
   done
   wait "$eval_pid" 2>/dev/null || true
 
-  # Extract the last line, keep only digits (truncate floats to integers)
+  # Extract the last non-blank line, keep only digits (truncate floats to integers)
   local raw
-  raw=$(tail -1 /tmp/wai-eval-out-$$.txt 2>/dev/null | grep -oE '[0-9]+' | head -1 || echo "")
-  rm -f /tmp/wai-eval-out-$$.txt /tmp/wai-eval-err-$$.txt
+  raw=$(sed '/^[[:space:]]*$/d' "$out_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1 || echo "")
+  rm -f "$out_file" "$err_file"
   echo "${raw:-error}"
 }
 
@@ -312,10 +322,23 @@ fi
 # Lockfile — prevent concurrent instances in the same directory
 LOCKDIR="$(pwd)/.wai-loop.lock"
 if ! mkdir "$LOCKDIR" 2>/dev/null; then
-  fail "Another wai-loop instance is running in this directory."
-  echo "    If not, remove: rmdir $LOCKDIR"
-  exit 1
+  # Check for stale lock (previous crash/kill -9)
+  if [ -f "$LOCKDIR/pid" ]; then
+    OLD_PID=$(cat "$LOCKDIR/pid" 2>/dev/null)
+    if [ -n "$OLD_PID" ] && ! kill -0 "$OLD_PID" 2>/dev/null; then
+      warn "Stale lockfile (PID $OLD_PID dead). Removing."
+      rm -rf "$LOCKDIR"
+      mkdir "$LOCKDIR" 2>/dev/null
+    else
+      fail "Another wai-loop (PID ${OLD_PID:-?}) is running in this directory."
+      exit 1
+    fi
+  else
+    fail "Lockdir exists with no PID file. Remove manually: rm -rf $LOCKDIR"
+    exit 1
+  fi
 fi
+echo $$ > "$LOCKDIR/pid"
 
 # .gitignore FIRST — before any git add
 if [ ! -f ".gitignore" ]; then
@@ -332,7 +355,9 @@ __pycache__/
 .wai-loop.lock
 GITIGNORE_EOF
 fi
-for pattern in '*.log' '.env' '.env.*' '*.pem' '*.key' '.wai-loop.lock'; do
+for pattern in '*.log' '.env' '.env.*' '*.pem' '*.key' '.wai-loop.lock' \
+               '*.sqlite' '*.sqlite3' '*.db' 'credentials.json' 'token.pickle' \
+               '*.p12' '*.pfx' 'service-account*.json'; do
   grep -qxF "$pattern" .gitignore 2>/dev/null || echo "$pattern" >> .gitignore
 done
 
@@ -474,9 +499,6 @@ Do NOT start servers or long-running processes." \
         ok "Eval verified ${DIM}(baseline: ${MAG}$EVAL_RESULT${RST}${DIM})${RST}"
       else
         warn "Eval returned '${RED}$EVAL_RESULT${RST}' — falling back to commit-based tracking"
-        if [ -f /tmp/wai-eval-err-$$.txt ] && [ -s /tmp/wai-eval-err-$$.txt ]; then
-          printf "  ${DIM}%s${RST}\n" "$(head -3 /tmp/wai-eval-err-$$.txt)"
-        fi
         rm -f memory/eval.sh
       fi
     else
@@ -491,9 +513,7 @@ Do NOT start servers or long-running processes." \
   fi
 
   # Commit setup artifacts
-  if ! git diff --quiet 2>/dev/null || \
-     ! git diff --cached --quiet 2>/dev/null || \
-     [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]; then
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
     git add -A
     git commit -q -m "wai-loop: setup for goal" -m "$GOAL"
   fi
@@ -537,9 +557,15 @@ fi
 FAILURES=0
 ITERATION=0
 BEST_METRIC=""
+CURRENT_METRIC=""
 START_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "none")
 START_TIME=$(date +%s)
 PREV_METRIC="${EVAL_BASELINE}"
+
+# Rotate progress log if it exceeds 1000 lines
+if [ -f "memory/progress.log" ] && [ "$(wc -l < memory/progress.log 2>/dev/null)" -gt 1000 ]; then
+  tail -500 memory/progress.log > memory/progress.log.tmp && mv memory/progress.log.tmp memory/progress.log
+fi
 TRAJECTORY="${EVAL_BASELINE}"
 
 printf "  ${DIM}Loop started at $(date +%H:%M) · max %d iterations · %d stalls${RST}\n" "$MAX_ITERATIONS" "$MAX_FAILURES"
@@ -639,25 +665,25 @@ NEVER STOP. Keep working until the goal is fully achieved."
   if [ -n "$PROTECTED_HASH_RUNSH" ]; then
     CURRENT_HASH=$(sha_cmd run.sh 2>/dev/null | cut -d' ' -f1)
     if [ "${CURRENT_HASH:-}" != "$PROTECTED_HASH_RUNSH" ]; then
-      warn "run.sh was modified by agent — restoring"
+      warn "run.sh was modified by agent — saving backup and restoring"
+      cp run.sh run.sh.agent-modified 2>/dev/null || true
       git checkout HEAD -- run.sh 2>/dev/null || true
     fi
   fi
   if [ -n "$PROTECTED_HASH_EVAL" ] && [ -f "memory/eval.sh" ]; then
     CURRENT_HASH=$(sha_cmd memory/eval.sh 2>/dev/null | cut -d' ' -f1)
     if [ "${CURRENT_HASH:-}" != "$PROTECTED_HASH_EVAL" ]; then
-      warn "eval.sh was modified by agent — restoring"
+      warn "eval.sh was modified by agent — saving backup and restoring"
+      cp memory/eval.sh memory/eval.sh.agent-modified 2>/dev/null || true
       git checkout HEAD -- memory/eval.sh 2>/dev/null || true
     fi
   fi
 
   # Auto-commit uncommitted changes (exclude log files)
   if [ "$LAST_HEAD" = "$CURRENT_HEAD" ]; then
-    if ! git diff --quiet 2>/dev/null || \
-       ! git diff --cached --quiet 2>/dev/null || \
-       [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]; then
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
       git add -A
-      git reset -- '*.log' 2>/dev/null || true
+      git reset -- ':(glob)**/*.log' 2>/dev/null || true
       git commit -q -m "wai-loop: auto-save iteration $ITERATION" 2>/dev/null || true
       CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "none")
     fi
@@ -672,7 +698,12 @@ NEVER STOP. Keep working until the goal is fully achieved."
   # ── Evaluate progress ──
   if [ "$HAS_EVAL" = true ]; then
     printf "  ${DIM}Measuring...${RST}"
+    EVAL_START_T=$(date +%s)
     CURRENT_METRIC=$(run_eval)
+    EVAL_ELAPSED_T=$(( $(date +%s) - EVAL_START_T ))
+    if [ "$EVAL_ELAPSED_T" -gt 30 ]; then
+      warn "Eval took ${EVAL_ELAPSED_T}s — consider optimizing memory/eval.sh"
+    fi
 
     if [[ "$CURRENT_METRIC" =~ ^[0-9]+$ ]]; then
       printf "\r                \r"
@@ -696,10 +727,16 @@ NEVER STOP. Keep working until the goal is fully achieved."
         fi
       fi
 
-      # Update trajectory (only if metric changed)
+      # Update trajectory (only if metric changed, cap at 20 entries)
       LAST_IN_TRAJECTORY="${TRAJECTORY##*> }"
       if [ "$CURRENT_METRIC" != "$LAST_IN_TRAJECTORY" ]; then
         TRAJECTORY="${TRAJECTORY} -> ${CURRENT_METRIC}"
+        # Prevent unbounded growth: keep last 20 data points
+        local traj_count
+        traj_count=$(echo "$TRAJECTORY" | tr '>' '\n' | wc -l | tr -d ' ')
+        if [ "$traj_count" -gt 20 ]; then
+          TRAJECTORY="... -> $(echo "$TRAJECTORY" | grep -oE '[0-9]+' | tail -19 | tr '\n' ' ' | sed 's/ / -> /g; s/ -> $//')${CURRENT_METRIC}"
+        fi
       fi
 
       # Log to progress file
@@ -786,12 +823,14 @@ NEVER STOP. Keep working until the goal is fully achieved."
   fi
 
   # Clean up old log files to prevent disk fill
-  find . -maxdepth 2 -type f -name "*.log" -not -path "./memory/*" -mmin +60 -delete 2>/dev/null || true
+  find . -maxdepth 2 -type f -name "*.log" \
+    -not -path "./memory/*" -not -path "./.git/*" -not -path "./node_modules/*" \
+    -mmin +30 -delete 2>/dev/null || true
 
   echo ""
 done
 
-# Kill orphaned child processes
+# Kill orphaned child processes (including grandchildren)
 pkill -P "$$" 2>/dev/null || true
 
 # ─── Summary ──────────────────────────────────────────────────────
@@ -808,7 +847,8 @@ TOTAL_MIN=$(( TOTAL_ELAPSED / 60 ))
 echo ""
 
 if [ "$HAS_EVAL" = true ]; then
-  FINAL_METRIC=$(run_eval)
+  # Use cached metric from last iteration if available, avoid redundant eval
+  FINAL_METRIC="${CURRENT_METRIC:-$(run_eval)}"
   GOAL_MET=false
   if [[ "$FINAL_METRIC" =~ ^[0-9]+$ ]] && check_goal "$FINAL_METRIC" "$EVAL_COMPARATOR" "$EVAL_TARGET" 2>/dev/null; then
     GOAL_MET=true
